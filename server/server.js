@@ -1,18 +1,172 @@
 import express from 'express';
 import multer from 'multer';
 import fs from 'node:fs/promises';
-import { mkdtemp } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
+
 const exec = promisify(execFile);
 const app = express();
+const PORT = Number(process.env.PORT || 3000);
 const MAX_FILE_SIZE = 500 * 1024 * 1024;
-app.use((req,res,next)=>{res.setHeader('Access-Control-Allow-Origin',process.env.ALLOWED_ORIGIN||'*');res.setHeader('Access-Control-Allow-Methods','POST,OPTIONS,GET');res.setHeader('Access-Control-Allow-Headers','Content-Type');next()});
-app.options('*',(req,res)=>res.sendStatus(204));
-const upload = multer({dest:os.tmpdir(),limits:{fileSize:MAX_FILE_SIZE,files:3}});
-app.get('/health',(req,res)=>res.json({ok:true,maxFileSize:MAX_FILE_SIZE}));
-app.post('/sign',upload.fields([{name:'ipa',maxCount:1},{name:'p12',maxCount:1},{name:'profile',maxCount:1}]),async(req,res)=>{let dir;const uploaded=Object.values(req.files||{}).flat();const cleanup=async()=>{if(dir)await fs.rm(dir,{recursive:true,force:true}).catch(()=>{});await Promise.all(uploaded.map(f=>f?.path?fs.rm(f.path,{force:true}).catch(()=>{}):null))};try{const ipa=req.files?.ipa?.[0],p12=req.files?.p12?.[0],profile=req.files?.profile?.[0];if(!ipa||!p12||!profile)return res.status(400).send('IPA, P12, and provisioning profile are required.');dir=await mkdtemp(path.join(os.tmpdir(),'ipa-signer-'));const inIpa=path.join(dir,'input.ipa'),cert=path.join(dir,'cert.p12'),prov=path.join(dir,'profile.mobileprovision'),out=path.join(dir,'signed.ipa');await Promise.all([fs.copyFile(ipa.path,inIpa),fs.copyFile(p12.path,cert),fs.copyFile(profile.path,prov)]);await cleanup();await exec('zsign',['-k',cert,'-p',req.body.password||'','-m',prov,'-o',out,inIpa],{timeout:600000,maxBuffer:1024*1024});res.download(out,'signed.ipa',async()=>{if(dir)await fs.rm(dir,{recursive:true,force:true}).catch(()=>{})})}catch(err){console.error(err);await cleanup();if(err?.code==='LIMIT_FILE_SIZE')return res.status(413).send('File exceeds the 500 MB maximum.');res.status(500).send('Signing failed. Check the certificate, password, provisioning profile, and IPA.')}});
-app.use((err,req,res,next)=>{console.error(err);if(err?.code==='LIMIT_FILE_SIZE')return res.status(413).send('File exceeds the 500 MB maximum.');res.status(400).send('Invalid upload.')});
-app.listen(process.env.PORT||3000,()=>console.log('IPA signer backend running; max IPA size: 500 MB'));
+const MAX_CERT_SIZE = 10 * 1024 * 1024;
+const MAX_PROFILE_SIZE = 10 * 1024 * 1024;
+const SIGN_TIMEOUT_MS = 15 * 60 * 1000;
+const TMP_ROOT = path.join(os.tmpdir(), 'ipa-signer');
+const allowedOrigins = (process.env.ALLOWED_ORIGIN || '*').split(',').map(v => v.trim()).filter(Boolean);
+
+await fs.mkdir(TMP_ROOT, { recursive: true });
+app.disable('x-powered-by');
+
+app.use((req, res, next) => {
+  const origin = req.headers.origin;
+  if (allowedOrigins.includes('*') || (origin && allowedOrigins.includes(origin))) {
+    res.setHeader('Access-Control-Allow-Origin', allowedOrigins.includes('*') ? '*' : origin);
+  }
+  res.setHeader('Vary', 'Origin');
+  res.setHeader('Access-Control-Allow-Methods', 'GET,POST,OPTIONS');
+  res.setHeader('Access-Control-Allow-Headers', 'Content-Type, X-Signer-Token');
+  if (req.method === 'OPTIONS') return res.sendStatus(204);
+  next();
+});
+
+// Disk-backed uploads keep a 500 MB IPA out of the Node.js heap.
+const upload = multer({
+  dest: TMP_ROOT,
+  limits: { fileSize: MAX_FILE_SIZE, files: 3, fields: 1, parts: 4 }
+});
+
+const recentRequests = new Map();
+const RATE_WINDOW_MS = 10 * 60 * 1000;
+const RATE_LIMIT = 3;
+
+function clientIp(req) {
+  return String(req.headers['x-forwarded-for'] || req.socket.remoteAddress || 'unknown').split(',')[0].trim();
+}
+function rateAllowed(req) {
+  const now = Date.now();
+  const ip = clientIp(req);
+  const recent = (recentRequests.get(ip) || []).filter(t => now - t < RATE_WINDOW_MS);
+  if (recent.length >= RATE_LIMIT) return false;
+  recent.push(now);
+  recentRequests.set(ip, recent);
+  return true;
+}
+function hasExt(file, ...extensions) {
+  return extensions.includes(path.extname(file.originalname || '').toLowerCase());
+}
+async function removeUploads(files = []) {
+  await Promise.all(files.filter(Boolean).map(file => fs.rm(file.path || file, { force: true }).catch(() => {})));
+}
+
+app.get('/health', async (_req, res) => {
+  try {
+    await exec('zsign', ['-h'], { timeout: 5000, maxBuffer: 256 * 1024 });
+    res.json({ ok: true, ready: true, signer: 'zsign', maxIpaMB: 500 });
+  } catch {
+    res.status(503).json({ ok: false, ready: false, error: 'zsign is unavailable' });
+  }
+});
+
+app.post('/sign', upload.fields([
+  { name: 'ipa', maxCount: 1 },
+  { name: 'p12', maxCount: 1 },
+  { name: 'provision', maxCount: 1 }
+]), async (req, res) => {
+  const ipa = req.files?.ipa?.[0];
+  const p12 = req.files?.p12?.[0];
+  const profile = req.files?.provision?.[0];
+  const uploaded = [ipa, p12, profile];
+  let workDir = null;
+
+  try {
+    if (!rateAllowed(req)) {
+      await removeUploads(uploaded);
+      return res.status(429).json({ error: 'Too many signing requests. Please wait a few minutes.' });
+    }
+    const password = String(req.body?.p12_password ?? '');
+    if (!ipa || !p12 || !profile) {
+      await removeUploads(uploaded);
+      return res.status(400).json({ error: 'IPA, P12, and provisioning profile are required.' });
+    }
+    if (!password) {
+      await removeUploads(uploaded);
+      return res.status(400).json({ error: 'The P12 password is required.' });
+    }
+    if (!hasExt(ipa, '.ipa')) {
+      await removeUploads(uploaded);
+      return res.status(400).json({ error: 'The app file must end in .ipa.' });
+    }
+    if (!hasExt(p12, '.p12', '.pfx')) {
+      await removeUploads(uploaded);
+      return res.status(400).json({ error: 'The certificate must be .p12 or .pfx.' });
+    }
+    if (!hasExt(profile, '.mobileprovision')) {
+      await removeUploads(uploaded);
+      return res.status(400).json({ error: 'The provisioning profile must end in .mobileprovision.' });
+    }
+    if (ipa.size > MAX_FILE_SIZE) {
+      await removeUploads(uploaded);
+      return res.status(413).json({ error: 'The IPA exceeds the 500 MB maximum.' });
+    }
+    if (p12.size > MAX_CERT_SIZE || profile.size > MAX_PROFILE_SIZE) {
+      await removeUploads(uploaded);
+      return res.status(413).json({ error: 'The certificate or provisioning profile is unexpectedly large.' });
+    }
+
+    workDir = await fs.mkdtemp(path.join(TMP_ROOT, 'job-'));
+    const inputIpa = path.join(workDir, 'input.ipa');
+    const cert = path.join(workDir, 'certificate.p12');
+    const provision = path.join(workDir, 'profile.mobileprovision');
+    const output = path.join(workDir, 'signed.ipa');
+
+    await Promise.all([
+      fs.rename(ipa.path, inputIpa),
+      fs.rename(p12.path, cert),
+      fs.rename(profile.path, provision)
+    ]);
+
+    await exec('zsign', ['-k', cert, '-p', password, '-m', provision, '-o', output, inputIpa], {
+      timeout: SIGN_TIMEOUT_MS,
+      maxBuffer: 2 * 1024 * 1024
+    });
+
+    const stat = await fs.stat(output);
+    if (!stat.isFile() || stat.size === 0) throw new Error('zsign produced no output');
+    const base = path.basename(ipa.originalname || 'app.ipa', '.ipa').replace(/[^A-Za-z0-9._-]/g, '_');
+    res.setHeader('Content-Type', 'application/octet-stream');
+    res.setHeader('Content-Disposition', `attachment; filename="signed-${base}.ipa"`);
+    res.setHeader('Content-Length', String(stat.size));
+    res.sendFile(output, async () => {
+      await fs.rm(workDir, { recursive: true, force: true }).catch(() => {});
+    });
+    workDir = null;
+  } catch (err) {
+    console.error('IPA signing error:', err?.message || err);
+    await removeUploads(uploaded);
+    if (workDir) await fs.rm(workDir, { recursive: true, force: true }).catch(() => {});
+    if (err?.code === 'LIMIT_FILE_SIZE') return res.status(413).json({ error: 'Upload exceeds the 500 MB maximum.' });
+    if (err?.killed || err?.signal === 'SIGTERM') return res.status(504).json({ error: 'Signing timed out. Large IPAs can take several minutes.' });
+    return res.status(500).json({ error: 'Signing failed. Check the IPA, P12 password, certificate, and provisioning profile.' });
+  }
+});
+
+app.use((err, _req, res, _next) => {
+  console.error('Upload error:', err?.message || err);
+  if (err?.code === 'LIMIT_FILE_SIZE') return res.status(413).json({ error: 'Upload exceeds the 500 MB maximum.' });
+  if (err?.code === 'LIMIT_PART_COUNT' || err?.code === 'LIMIT_FILE_COUNT') return res.status(400).json({ error: 'Too many uploaded parts.' });
+  return res.status(400).json({ error: 'Invalid multipart upload.' });
+});
+
+const server = app.listen(PORT, '0.0.0.0', () => console.log(`IPA signer listening on ${PORT}; max IPA 500 MB`));
+server.requestTimeout = SIGN_TIMEOUT_MS;
+server.headersTimeout = SIGN_TIMEOUT_MS + 30000;
+setInterval(() => {
+  const now = Date.now();
+  for (const [ip, times] of recentRequests) {
+    const recent = times.filter(t => now - t < RATE_WINDOW_MS);
+    if (recent.length) recentRequests.set(ip, recent); else recentRequests.delete(ip);
+  }
+}, RATE_WINDOW_MS).unref();
+process.on('SIGTERM', () => server.close(() => process.exit(0)));
