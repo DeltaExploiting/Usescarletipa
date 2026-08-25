@@ -1,1 +1,85 @@
-<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover"><title>IPA Signer</title><style>*{box-sizing:border-box}body{margin:0;background:#0b0b0f;color:#f5f5f7;font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif}.wrap{width:min(680px,calc(100% - 32px));margin:auto;padding:44px 0 80px}h1{text-align:center;font-size:44px;margin:0 0 8px}.sub{text-align:center;color:#aaa;margin:0 0 28px}.card{background:#14141b;border:1px solid #ffffff14;border-radius:22px;padding:22px;margin:14px 0}label{display:block;font-weight:750;margin-bottom:10px}.drop{display:block;padding:28px 18px;border:1.5px dashed #ffffff35;border-radius:16px;text-align:center;color:#aaa;cursor:pointer}.name{font-size:13px;color:#aaa;margin-top:9px;min-height:18px;overflow-wrap:anywhere}.size{font-size:12px;color:#777;margin-top:4px}.pw,.api{width:100%;padding:15px;border-radius:12px;border:1px solid #ffffff1c;background:#0c0c10;color:#fff;font-size:16px}.btn{width:100%;border:0;border-radius:15px;padding:17px;background:#e53232;color:#fff;font-weight:800;font-size:17px;cursor:pointer;margin-top:10px}.btn:disabled{opacity:.45;cursor:not-allowed}.status{text-align:center;color:#aaa;min-height:24px;margin:18px 0 0;font-size:14px;line-height:1.45}.progress{height:8px;background:#202028;border-radius:99px;overflow:hidden;margin-top:14px;display:none}.bar{height:100%;width:0;background:#e53232;transition:width .15s}.small{font-size:12px;color:#777;margin-top:7px;line-height:1.5}.ok{color:#7ee2a8}.err{color:#ff8d8d}.back{display:block;text-align:center;color:#aaa;margin-top:24px;text-decoration:none}</style></head><body><main class="wrap"><h1>IPA Signer</h1><p class="sub">SnapDeploy IPA signing • up to 500 MB</p><div class="card"><label>IPA file</label><label class="drop"><input id="ipa" type="file" accept=".ipa,application/octet-stream" hidden><span>Tap to choose an .ipa file</span><div class="name" id="ipaName"></div><div class="size" id="ipaSize"></div></label></div><div class="card"><label>Certificate (.p12)</label><label class="drop"><input id="p12" type="file" accept=".p12,.pfx,application/x-pkcs12" hidden><span>Tap to choose your certificate</span><div class="name" id="p12Name"></div></label><div style="height:16px"></div><label>Certificate password</label><input id="password" class="pw" type="password" autocomplete="off" placeholder="Enter P12 password"></div><div class="card"><label>Provisioning profile</label><label class="drop"><input id="profile" type="file" accept=".mobileprovision,application/octet-stream" hidden><span>Tap to choose .mobileprovision</span><div class="name" id="profileName"></div></label></div><div class="card"><label>Signing backend</label><input id="api" class="api" type="url" inputmode="url" placeholder="https://scarlet-353b6.containers.snapdeploy.app"><div class="small">Your SnapDeploy backend is preconfigured. It must expose <code>/sign</code> and <code>/health</code>. The URL is saved only in this browser.</div></div><button class="btn" id="sign" disabled>Sign IPA</button><div class="progress" id="progress"><div class="bar" id="bar"></div></div><div class="status" id="status">Choose your files and enter your signing backend URL.</div><a class="back" href="index.html">← Back to Scarlet</a></main><script>const MAX=500*1024*1024,$=id=>document.getElementById(id),DEFAULT_API='https://scarlet-353b6.containers.snapdeploy.app',api=$('api');api.value=localStorage.getItem('ipaSignerSnapDeploy')||new URLSearchParams(location.search).get('api')||DEFAULT_API;const ids=['ipa','p12','profile'];const fmt=n=>{const u=['B','KB','MB','GB'];let i=0,v=n;while(v>=1024&&i<3){v/=1024;i++}return`${v.toFixed(i?1:0)} ${u[i]}`};function refresh(){ids.forEach(id=>{$(id+'Name').textContent=$(id).files[0]?.name||'';if($(id+'Size'))$(id+'Size').textContent=id==='ipa'&&$(id).files[0]?fmt($(id).files[0].size):''});$('sign').disabled=!($('ipa').files[0]&&$('p12').files[0]&&$('profile').files[0]&&$('password').value&&api.value.trim())}ids.forEach(id=>$(id).addEventListener('change',refresh));$('password').addEventListener('input',refresh);api.addEventListener('input',()=>{localStorage.setItem('ipaSignerSnapDeploy',api.value.trim());refresh()});function status(t,c=''){const s=$('status');s.textContent=t;s.className='status '+c}$('sign').onclick=()=>{const ipa=$('ipa').files[0],p12=$('p12').files[0],profile=$('profile').files[0],password=$('password').value,base=api.value.trim().replace(/\/$/,'');if(!ipa||!p12||!profile||!password||!base)return status('Complete every field.','err');if(!/^https:\/\//i.test(base))return status('Use your HTTPS SnapDeploy URL.','err');if(ipa.size>MAX)return status('IPA is too large. Maximum is 500 MB.','err');$('sign').disabled=true;$('progress').style.display='block';$('bar').style.width='0%';status('Uploading to SnapDeploy…');const fd=new FormData();fd.append('ipa',ipa);fd.append('p12',p12);fd.append('provision',profile);fd.append('p12_password',password);const x=new XMLHttpRequest();x.open('POST',base+'/sign');x.responseType='blob';x.timeout=20*60*1000;x.upload.onprogress=e=>{if(e.lengthComputable){const p=Math.round(e.loaded/e.total*100);$('bar').style.width=p+'%';status(`Uploading… ${p}%`)}};x.onload=()=>{if(x.status>=200&&x.status<300){$('bar').style.width='100%';const cd=x.getResponseHeader('Content-Disposition')||'',m=cd.match(/filename="?([^";]+)"?/i),name=m?m[1]:'signed-'+ipa.name,url=URL.createObjectURL(x.response),a=document.createElement('a');a.href=url;a.download=name;document.body.appendChild(a);a.click();a.remove();setTimeout(()=>URL.revokeObjectURL(url),10000);status('Signing complete.','ok')}else{const r=new FileReader();r.onload=()=>{let msg=`Signing failed (HTTP ${x.status}).`;try{const j=JSON.parse(r.result);if(j.error)msg=j.error}catch{}status(msg,'err')};r.readAsText(x.response)}$('sign').disabled=false;refresh()};x.onerror=()=>{status('Could not reach SnapDeploy. Check the URL, CORS, and that /health is online.','err');$('sign').disabled=false;refresh()};x.ontimeout=()=>{status('Request timed out. Large IPAs may take several minutes.','err');$('sign').disabled=false;refresh()};x.send(fd)};refresh();</script></body></html>
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+<title>IPA Signer</title>
+<style>
+*{box-sizing:border-box}body{margin:0;background:#0b0b0f;color:#f5f5f7;font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif}.wrap{width:min(680px,calc(100% - 32px));margin:auto;padding:44px 0 80px}h1{text-align:center;font-size:44px;margin:0 0 8px}.sub{text-align:center;color:#aaa;margin:0 0 28px}.card{background:#14141b;border:1px solid #ffffff14;border-radius:22px;padding:22px;margin:14px 0}label{display:block;font-weight:750;margin-bottom:10px}.drop{display:block;padding:28px 18px;border:1.5px dashed #ffffff35;border-radius:16px;text-align:center;color:#aaa;cursor:pointer}.name{font-size:13px;color:#aaa;margin-top:9px;min-height:18px;overflow-wrap:anywhere}.size{font-size:12px;color:#777;margin-top:4px}.pw,.api{width:100%;padding:15px;border-radius:12px;border:1px solid #ffffff1c;background:#0c0c10;color:#fff;font-size:16px}.btn{width:100%;border:0;border-radius:15px;padding:17px;background:#e53232;color:#fff;font-weight:800;font-size:17px;cursor:pointer;margin-top:10px}.btn:disabled{opacity:.45;cursor:not-allowed}.status{text-align:center;color:#aaa;min-height:24px;margin:18px 0 0;font-size:14px;line-height:1.45}.progress{height:8px;background:#202028;border-radius:99px;overflow:hidden;margin-top:14px;display:none}.bar{height:100%;width:0;background:#e53232;transition:width .15s}.small{font-size:12px;color:#777;margin-top:7px;line-height:1.5}.ok{color:#7ee2a8}.err{color:#ff8d8d}.back{display:block;text-align:center;color:#aaa;margin-top:24px;text-decoration:none}
+</style>
+</head>
+<body>
+<main class="wrap">
+<h1>IPA Signer</h1>
+<p class="sub">SnapDeploy IPA signing • up to 500 MB</p>
+<div class="card"><label>IPA file</label><label class="drop"><input id="ipa" type="file" accept=".ipa,application/octet-stream" hidden><span>Tap to choose an .ipa file</span><div class="name" id="ipaName"></div><div class="size" id="ipaSize"></div></label></div>
+<div class="card"><label>Certificate (.p12)</label><label class="drop"><input id="p12" type="file" accept=".p12,.pfx,application/x-pkcs12" hidden><span>Tap to choose your certificate</span><div class="name" id="p12Name"></div></label><div style="height:16px"></div><label>Certificate password</label><input id="password" class="pw" type="password" autocomplete="off" placeholder="Enter P12 password"></div>
+<div class="card"><label>Provisioning profile</label><label class="drop"><input id="profile" type="file" accept=".mobileprovision,application/octet-stream" hidden><span>Tap to choose .mobileprovision</span><div class="name" id="profileName"></div></label></div>
+<div class="card"><label>Signing backend</label><input id="api" class="api" type="url" inputmode="url" placeholder="https://scarlet-353b6.containers.snapdeploy.app"><div class="small">The backend is preconfigured. Before uploading, the signer now wakes and checks the backend automatically.</div></div>
+<button class="btn" id="sign" disabled>Sign IPA</button>
+<div class="progress" id="progress"><div class="bar" id="bar"></div></div>
+<div class="status" id="status">Choose your files and enter your signing backend URL.</div>
+<a class="back" href="index.html">← Back to Scarlet</a>
+</main>
+<script>
+const MAX=500*1024*1024;
+const DEFAULT_API='https://scarlet-353b6.containers.snapdeploy.app';
+const $=id=>document.getElementById(id);
+const api=$('api');
+api.value=localStorage.getItem('ipaSignerSnapDeploy')||new URLSearchParams(location.search).get('api')||DEFAULT_API;
+const ids=['ipa','p12','profile'];
+const fmt=n=>{const u=['B','KB','MB','GB'];let i=0,v=n;while(v>=1024&&i<3){v/=1024;i++}return`${v.toFixed(i?1:0)} ${u[i]}`};
+function refresh(){ids.forEach(id=>{$(id+'Name').textContent=$(id).files[0]?.name||'';if($(id+'Size'))$(id+'Size').textContent=id==='ipa'&&$(id).files[0]?fmt($(id).files[0].size):''});$('sign').disabled=!($('ipa').files[0]&&$('p12').files[0]&&$('profile').files[0]&&$('password').value&&api.value.trim())}
+ids.forEach(id=>$(id).addEventListener('change',refresh));
+$('password').addEventListener('input',refresh);
+api.addEventListener('input',()=>{localStorage.setItem('ipaSignerSnapDeploy',api.value.trim());refresh()});
+function status(t,c=''){const s=$('status');s.textContent=t;s.className='status '+c}
+function sleep(ms){return new Promise(r=>setTimeout(r,ms))}
+async function wakeBackend(base){
+  let last='';
+  for(let attempt=1;attempt<=5;attempt++){
+    try{
+      status(attempt===1?'Waking SnapDeploy backend…':`Waiting for SnapDeploy to wake… (${attempt}/5)`);
+      const controller=new AbortController();
+      const timer=setTimeout(()=>controller.abort(),15000);
+      const r=await fetch(base+'/health',{method:'GET',cache:'no-store',signal:controller.signal});
+      clearTimeout(timer);
+      const text=await r.text();
+      if(r.ok){
+        let data={};try{data=JSON.parse(text)}catch{}
+        if(data.ready===false)return {ok:false,message:data.error||'The signing engine is not ready yet.'};
+        return {ok:true};
+      }
+      last=`HTTP ${r.status}`;
+      if(r.status>=400&&r.status<500)return {ok:false,message:`Backend health check failed (${r.status}).`};
+    }catch(e){last=e?.name==='AbortError'?'timeout':'connection error'}
+    if(attempt<5)await sleep(5000);
+  }
+  return {ok:false,message:`Could not wake the backend (${last}). Open the SnapDeploy URL once, wait about a minute, then try again.`};
+}
+$('sign').onclick=async()=>{
+  const ipa=$('ipa').files[0],p12=$('p12').files[0],profile=$('profile').files[0],password=$('password').value,base=api.value.trim().replace(/\/$/,'');
+  if(!ipa||!p12||!profile||!password||!base)return status('Complete every field.','err');
+  if(!/^https:\/\//i.test(base))return status('Use your HTTPS SnapDeploy URL.','err');
+  if(ipa.size>MAX)return status('IPA is too large. Maximum is 500 MB.','err');
+  $('sign').disabled=true;$('progress').style.display='block';$('bar').style.width='0%';
+  const ready=await wakeBackend(base);
+  if(!ready.ok){status(ready.message,'err');$('sign').disabled=false;refresh();return}
+  status('Backend is ready. Uploading IPA…');
+  const fd=new FormData();fd.append('ipa',ipa);fd.append('p12',p12);fd.append('provision',profile);fd.append('p12_password',password);
+  const x=new XMLHttpRequest();
+  x.open('POST',base+'/sign');x.responseType='blob';x.timeout=20*60*1000;
+  x.upload.onprogress=e=>{if(e.lengthComputable){const p=Math.round(e.loaded/e.total*100);$('bar').style.width=p+'%';status(`Uploading… ${p}%`)}};
+  x.onload=()=>{
+    if(x.status>=200&&x.status<300){$('bar').style.width='100%';const cd=x.getResponseHeader('Content-Disposition')||'',m=cd.match(/filename="?([^";]+)"?/i),name=m?m[1]:'signed-'+ipa.name,url=URL.createObjectURL(x.response),a=document.createElement('a');a.href=url;a.download=name;document.body.appendChild(a);a.click();a.remove();setTimeout(()=>URL.revokeObjectURL(url),10000);status('Signing complete.','ok')}
+    else{const r=new FileReader();r.onload=()=>{let msg=`Signing failed (HTTP ${x.status}).`;try{const j=JSON.parse(r.result);if(j.error)msg=j.error}catch{}status(msg,'err')};r.readAsText(x.response)}
+    $('sign').disabled=false;refresh();
+  };
+  x.onerror=()=>{status('The backend connection was lost during upload. The IPA was not downloaded. Try again; the backend is now warmed up.','err');$('sign').disabled=false;refresh()};
+  x.ontimeout=()=>{status('Request timed out. Large IPAs may take several minutes.','err');$('sign').disabled=false;refresh()};
+  x.send(fd);
+};
+refresh();
+</script>
+</body>
+</html>
