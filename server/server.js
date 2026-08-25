@@ -127,8 +127,8 @@ app.post('/sign', upload.fields([
       fs.rename(profile.path, provision)
     ]);
 
-    // Low compression and quiet mode make the repack step substantially faster.
-    await exec('zsign', ['-q', '-z', '1', '-k', cert, '-p', password, '-m', provision, '-o', output, inputIpa], {
+    // ZIP level 0 disables compression for the fastest possible repack of large IPAs.
+    await exec('zsign', ['-q', '-z', '0', '-k', cert, '-p', password, '-m', provision, '-o', output, inputIpa], {
       timeout: SIGN_TIMEOUT_MS,
       maxBuffer: 2 * 1024 * 1024
     });
@@ -136,7 +136,6 @@ app.post('/sign', upload.fields([
     const stat = await fs.stat(output);
     if (!stat.isFile() || stat.size === 0) throw new Error('zsign produced no output');
 
-    // Remove the original IPA and signing credentials before returning the result.
     await Promise.all([
       fs.rm(inputIpa, { force: true }),
       fs.rm(cert, { force: true }),
