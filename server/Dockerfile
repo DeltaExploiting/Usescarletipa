@@ -16,7 +16,7 @@ RUN npm install --omit=dev && chown -R node:node /app
 COPY --chown=node:node server.js ./
 
 ENV NODE_ENV=production
-ENV PORT=3000
-EXPOSE 3000
+ENV PORT=8080
+EXPOSE 8080
 USER node
 CMD ["node", "server.js"]
