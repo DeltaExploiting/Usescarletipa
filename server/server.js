@@ -127,13 +127,22 @@ app.post('/sign', upload.fields([
       fs.rename(profile.path, provision)
     ]);
 
-    await exec('zsign', ['-k', cert, '-p', password, '-m', provision, '-o', output, inputIpa], {
+    // Low compression and quiet mode make the repack step substantially faster.
+    await exec('zsign', ['-q', '-z', '1', '-k', cert, '-p', password, '-m', provision, '-o', output, inputIpa], {
       timeout: SIGN_TIMEOUT_MS,
       maxBuffer: 2 * 1024 * 1024
     });
 
     const stat = await fs.stat(output);
     if (!stat.isFile() || stat.size === 0) throw new Error('zsign produced no output');
+
+    // Remove the original IPA and signing credentials before returning the result.
+    await Promise.all([
+      fs.rm(inputIpa, { force: true }),
+      fs.rm(cert, { force: true }),
+      fs.rm(provision, { force: true })
+    ]);
+
     const base = path.basename(ipa.originalname || 'app.ipa', '.ipa').replace(/[^A-Za-z0-9._-]/g, '_');
     res.setHeader('Content-Type', 'application/octet-stream');
     res.setHeader('Content-Disposition', `attachment; filename="signed-${base}.ipa"`);
