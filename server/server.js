@@ -144,11 +144,12 @@ app.post('/sign', upload.fields([
     ]);
 
     const base = path.basename(ipa.originalname || 'app.ipa', '.ipa').replace(/[^A-Za-z0-9._-]/g, '_');
+    const cleanupDir = workDir;
     res.setHeader('Content-Type', 'application/octet-stream');
     res.setHeader('Content-Disposition', `attachment; filename="signed-${base}.ipa"`);
     res.setHeader('Content-Length', String(stat.size));
     res.sendFile(output, async () => {
-      await fs.rm(workDir, { recursive: true, force: true }).catch(() => {});
+      await fs.rm(cleanupDir, { recursive: true, force: true }).catch(() => {});
     });
     workDir = null;
   } catch (err) {
