@@ -14,15 +14,17 @@ const MAX_CERT_SIZE = 10 * 1024 * 1024;
 const MAX_PROFILE_SIZE = 10 * 1024 * 1024;
 const SIGN_TIMEOUT_MS = 15 * 60 * 1000;
 const TMP_ROOT = path.join(os.tmpdir(), 'ipa-signer');
-const allowedOrigins = (process.env.ALLOWED_ORIGIN || '*').split(',').map(v => v.trim()).filter(Boolean);
+const configuredOrigins = (process.env.ALLOWED_ORIGIN || '').split(',').map(v => v.trim()).filter(Boolean);
+const allowedOrigins = new Set(['https://scarlet-ipainstall.github.io', ...configuredOrigins]);
 
 await fs.mkdir(TMP_ROOT, { recursive: true });
 app.disable('x-powered-by');
 
+// CORS for the GitHub Pages signer. No credentials/cookies are used by the API.
 app.use((req, res, next) => {
   const origin = req.headers.origin;
-  if (allowedOrigins.includes('*') || (origin && allowedOrigins.includes(origin))) {
-    res.setHeader('Access-Control-Allow-Origin', allowedOrigins.includes('*') ? '*' : origin);
+  if (origin && (allowedOrigins.has(origin) || allowedOrigins.has('*'))) {
+    res.setHeader('Access-Control-Allow-Origin', allowedOrigins.has('*') ? '*' : origin);
   }
   res.setHeader('Vary', 'Origin');
   res.setHeader('Access-Control-Allow-Methods', 'GET,POST,OPTIONS');
@@ -31,7 +33,6 @@ app.use((req, res, next) => {
   next();
 });
 
-// Disk-backed uploads keep a 500 MB IPA out of the Node.js heap.
 const upload = multer({
   dest: TMP_ROOT,
   limits: { fileSize: MAX_FILE_SIZE, files: 3, fields: 1, parts: 4 }
@@ -60,13 +61,19 @@ async function removeUploads(files = []) {
   await Promise.all(files.filter(Boolean).map(file => fs.rm(file.path || file, { force: true }).catch(() => {})));
 }
 
-app.get('/health', async (_req, res) => {
-  try {
-    await exec('zsign', ['-h'], { timeout: 5000, maxBuffer: 256 * 1024 });
-    res.json({ ok: true, ready: true, signer: 'zsign', maxIpaMB: 500 });
-  } catch {
-    res.status(503).json({ ok: false, ready: false, error: 'zsign is unavailable' });
+// Lightweight endpoints intentionally do not execute zsign. They must respond
+// immediately so a sleeping SnapDeploy container can be woken by normal HTTP traffic.
+app.get('/', (_req, res) => res.json({ ok: true, service: 'ipa-signer', status: 'online' }));
+app.get('/health', async (req, res) => {
+  if (req.query.deep === '1') {
+    try {
+      await exec('zsign', ['-h'], { timeout: 5000, maxBuffer: 256 * 1024 });
+      return res.json({ ok: true, ready: true, signer: 'zsign', maxIpaMB: 500 });
+    } catch {
+      return res.status(503).json({ ok: false, ready: false, error: 'zsign is unavailable' });
+    }
   }
+  res.json({ ok: true, ready: true, signer: 'zsign', maxIpaMB: 500 });
 });
 
 app.post('/sign', upload.fields([
@@ -127,7 +134,6 @@ app.post('/sign', upload.fields([
       fs.rename(profile.path, provision)
     ]);
 
-    // ZIP level 0 disables compression for the fastest possible repack of large IPAs.
     await exec('zsign', ['-q', '-z', '0', '-k', cert, '-p', password, '-m', provision, '-o', output, inputIpa], {
       timeout: SIGN_TIMEOUT_MS,
       maxBuffer: 2 * 1024 * 1024
