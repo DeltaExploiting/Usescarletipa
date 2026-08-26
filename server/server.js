@@ -20,7 +20,6 @@ const allowedOrigins = new Set(['https://scarlet-ipainstall.github.io', ...confi
 await fs.mkdir(TMP_ROOT, { recursive: true });
 app.disable('x-powered-by');
 
-// CORS for the GitHub Pages signer. No credentials/cookies are used by the API.
 app.use((req, res, next) => {
   const origin = req.headers.origin;
   if (origin && (allowedOrigins.has(origin) || allowedOrigins.has('*'))) {
@@ -36,7 +35,7 @@ app.use((req, res, next) => {
 
 const upload = multer({
   dest: TMP_ROOT,
-  limits: { fileSize: MAX_FILE_SIZE, files: 3, fields: 1, parts: 4 }
+  limits: { fileSize: MAX_FILE_SIZE, files: 3, fields: 5, parts: 10 }
 });
 
 const recentRequests = new Map();
@@ -62,8 +61,6 @@ async function removeUploads(files = []) {
   await Promise.all(files.filter(Boolean).map(file => fs.rm(file.path || file, { force: true }).catch(() => {})));
 }
 
-// Lightweight endpoints intentionally do not execute zsign. They must respond
-// immediately so a sleeping SnapDeploy container can be woken by normal HTTP traffic.
 app.get('/', (_req, res) => res.json({ ok: true, service: 'ipa-signer', status: 'online' }));
 app.get('/health', async (req, res) => {
   if (req.query.deep === '1') {
