@@ -26,9 +26,10 @@ app.use((req, res, next) => {
   if (origin && (allowedOrigins.has(origin) || allowedOrigins.has('*'))) {
     res.setHeader('Access-Control-Allow-Origin', allowedOrigins.has('*') ? '*' : origin);
   }
-  res.setHeader('Vary', 'Origin');
   res.setHeader('Access-Control-Allow-Methods', 'GET,POST,OPTIONS');
   res.setHeader('Access-Control-Allow-Headers', 'Content-Type, X-Signer-Token');
+  res.setHeader('Access-Control-Allow-Private-Network', 'true');
+  res.setHeader('Vary', 'Origin, Access-Control-Request-Private-Network');
   if (req.method === 'OPTIONS') return res.sendStatus(204);
   next();
 });
