@@ -15,7 +15,7 @@
 <div class="card"><label>IPA file</label><label class="drop"><input id="ipa" type="file" accept=".ipa,application/octet-stream" hidden><span>Tap to choose an .ipa file</span><div class="name" id="ipaName"></div><div class="size" id="ipaSize"></div></label></div>
 <div class="card"><label>Certificate (.p12)</label><label class="drop"><input id="p12" type="file" accept=".p12,.pfx,application/x-pkcs12" hidden><span>Tap to choose your certificate</span><div class="name" id="p12Name"></div></label><div style="height:16px"></div><label>Certificate password</label><input id="password" class="pw" type="password" autocomplete="off" placeholder="Enter P12 password"></div>
 <div class="card"><label>Provisioning profile</label><label class="drop"><input id="profile" type="file" accept=".mobileprovision,application/octet-stream" hidden><span>Tap to choose .mobileprovision</span><div class="name" id="profileName"></div></label></div>
-<div class="card"><label>Signing backend</label><input id="api" class="api" type="url" inputmode="url" placeholder="https://scarlet-353b6.containers.snapdeploy.app"><div class="small">The backend is preconfigured. The signer first sends a lightweight request to wake the container, then checks it before uploading.</div></div>
+<div class="card"><label>Signing backend</label><input id="api" class="api" type="url" inputmode="url" placeholder="https://scarlet-353b6.containers.snapdeploy.app"><div class="small">The backend is preconfigured. The signer first wakes the container with a lightweight request, then checks it before uploading.</div></div>
 <button class="btn" id="sign" disabled>Sign IPA</button>
 <div class="progress" id="progress"><div class="bar" id="bar"></div></div>
 <div class="status" id="status">Choose your files and enter your signing backend URL.</div>
@@ -35,30 +35,26 @@ $('password').addEventListener('input',refresh);
 api.addEventListener('input',()=>{localStorage.setItem('ipaSignerSnapDeploy',api.value.trim());refresh()});
 function status(t,c=''){const s=$('status');s.textContent=t;s.className='status '+c}
 function sleep(ms){return new Promise(r=>setTimeout(r,ms))}
-async function requestWithTimeout(url,ms=20000){
-  const controller=new AbortController();
-  const timer=setTimeout(()=>controller.abort(),ms);
-  try{return await fetch(url,{method:'GET',cache:'no-store',mode:'cors',signal:controller.signal})}
-  finally{clearTimeout(timer)}
-}
 async function wakeBackend(base){
   let last='';
-  for(let attempt=1;attempt<=6;attempt++){
+  for(let attempt=1;attempt<=8;attempt++){
     try{
-      status(attempt===1?'Waking SnapDeploy backend…':`Waiting for SnapDeploy to wake… (${attempt}/6)`);
-      // Root is deliberately lightweight and is the first request sent to a sleeping container.
-      const root=await requestWithTimeout(base+'/',20000);
-      if(root.ok){
-        // Give the platform a moment to finish routing the newly-woken container.
-        await sleep(1500);
-        const health=await requestWithTimeout(base+'/health',10000);
-        if(health.ok){
-          let data={};try{data=await health.json()}catch{}
-          if(data.ready!==false)return {ok:true};
-        } else last=`health HTTP ${health.status}`;
-      } else last=`root HTTP ${root.status}`;
+      status(attempt===1?'Waking SnapDeploy backend…':`Waiting for SnapDeploy to wake… (${attempt}/8)`);
+      // A no-cors root request can wake a sleeping container even when its CORS
+      // headers are not available yet. We do not read this response.
+      await fetch(base+'/',{method:'GET',cache:'no-store',mode:'no-cors'});
+      await sleep(3000);
+      const controller=new AbortController();
+      const timer=setTimeout(()=>controller.abort(),15000);
+      const health=await fetch(base+'/health?deep=1',{method:'GET',cache:'no-store',mode:'cors',signal:controller.signal});
+      clearTimeout(timer);
+      if(health.ok){
+        let data={};try{data=await health.json()}catch{}
+        if(data.ready!==false)return {ok:true};
+        last=data.error||'signing engine not ready';
+      } else last=`health HTTP ${health.status}`;
     }catch(e){last=e?.name==='AbortError'?'timeout':'connection/CORS error'}
-    if(attempt<6)await sleep(5000);
+    if(attempt<8)await sleep(5000);
   }
   return {ok:false,message:`SnapDeploy could not be reached after several wake attempts (${last}). Open the backend URL in Safari once, wait about 60 seconds for it to wake, then return here and try again.`};
 }
